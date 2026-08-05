@@ -1,0 +1,114 @@
+name: Security CI Pipeline
+
+# Runs the full security pipeline (SBOM generation + SCA + SAST) on every push
+# and pull request against the dvwsnode project.
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # needed to upload SARIF reports to the Security tab
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1. Checkout repository
+      # ---------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # 2. Install required runtime (Node.js, since dvwsnode is a Node app)
+      # ---------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      # ---------------------------------------------------------------
+      # 3. Build the application
+      # ---------------------------------------------------------------
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build project (skips gracefully if no build script exists)
+        run: npm run build --if-present
+
+      # ---------------------------------------------------------------
+      # 4. Generate SBOM with Syft
+      # ---------------------------------------------------------------
+      - name: Generate SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dvwsnode-sbom.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dvwsnode-sbom
+          path: dvwsnode-sbom.json
+
+      # ---------------------------------------------------------------
+      # 5. SCA scan on the SBOM with Grype
+      #    Policy: fail the build on any Critical severity finding
+      #    (severity-cutoff=critical also covers findings with CVSS >= 9.0,
+      #    since Grype maps CVSS >= 9.0 to the "Critical" severity bucket)
+      # ---------------------------------------------------------------
+      - name: SCA scan (Grype)
+        id: grype-scan
+        uses: anchore/scan-action@v4
+        with:
+          sbom: dvwsnode-sbom.json
+          fail-build: true
+          severity-cutoff: critical
+          output-format: sarif
+
+      - name: Upload Grype SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.grype-scan.outputs.sarif }}
+          category: grype-sca
+
+      - name: Upload Grype report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-sca-report
+          path: ${{ steps.grype-scan.outputs.sarif }}
+
+      # ---------------------------------------------------------------
+      # 6. SAST scan with Snyk
+      #    Policy: fail the build on any Critical severity finding
+      #    Requires a SNYK_TOKEN secret configured in the repo settings
+      # ---------------------------------------------------------------
+      - name: SAST scan (Snyk)
+        uses: snyk/actions/node@master
+        continue-on-error: false
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=critical --sarif-file-output=snyk-sast.sarif
+
+      - name: Upload Snyk SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-sast.sarif
+          category: snyk-sast
+
+      - name: Upload Snyk report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-sast-report
+          path: snyk-sast.sarif
