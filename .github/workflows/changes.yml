@@ -1,0 +1,91 @@
+name: Security CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build project
+        run: npm run build --if-present
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dvwsnode-sbom.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dvwsnode-sbom
+          path: dvwsnode-sbom.json
+
+      - name: SCA scan with Grype
+        id: grype-scan
+        uses: anchore/scan-action@v4
+        with:
+          sbom: dvwsnode-sbom.json
+          fail-build: true
+          severity-cutoff: critical
+          output-format: sarif
+
+      - name: Upload Grype SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.grype-scan.outputs.sarif }}
+          category: grype-sca
+
+      - name: Upload Grype report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-sca-report
+          path: ${{ steps.grype-scan.outputs.sarif }}
+
+      - name: SAST scan with Snyk
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=critical --sarif-file-output=snyk-sast.sarif
+
+      - name: Upload Snyk SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-sast.sarif
+          category: snyk-sast
+
+      - name: Upload Snyk report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-sast-report
+          path: snyk-sast.sarif
